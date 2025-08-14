@@ -1,56 +1,31 @@
-# Made by Frank Gadot 
-# This Dockerfile builds the Meshtastic Local Web Client using Bun.
-# It uses a multi-stage build to keep the final image small and efficient.
-# The first stage clones the repository, installs dependencies, and builds the static site.
-# The second stage serves the built site using Bun's preview server.
-# meshtastic-local-web-client/Dockerfile
-# Version: 1.0
-# Base image: oven/bun:1.1
-# License: MIT
+# ---------- Stage 1: build ----------
+FROM node:20-bullseye-slim AS builder
 
-# meshtastic-local-web-client/Dockerfile
-################  Stage 1 — clone & build  ################
-# Use Bun for building
-FROM oven/bun:1.1 AS builder
+# Tools needed to clone & verify TLS
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates && rm -rf /var/lib/apt/lists/*
 
-# Install git **and** the CA bundle
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+# Enable pnpm via Corepack (ships with Node >=16.13)
+RUN corepack enable && corepack prepare pnpm@9.12.3 --activate
 
-# Shallow-clone + fetch tags so git-describe works
+# Clone repo (shallow + tags for git-describe)
 RUN git clone --depth 20 --single-branch https://github.com/meshtastic/web.git /app \
  && git -C /app fetch --tags --depth 1
 
- WORKDIR /app
-
-# remove the old v1 lockfile so Bun generates a fresh one
-RUN rm -f bun.lock
-
-# Install all dependencies for the monorepo
-RUN bun install 
-
-# Build the static site
-WORKDIR /app/packages/web
-RUN bun run build                      # produces dist/
-
-
-
-
-################  Stage 2 — serve it  ################
-FROM oven/bun:1.1
-
-# add this block ↓ just once in the second stage
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
-
-# 1- Copy the repo to /app
 WORKDIR /app
-COPY --from=builder /app /app
 
-# 2- Then switch into the web package
+# Install workspace deps with pnpm (respects preinstall hook)
+RUN pnpm install --frozen-lockfile
+
+# Build the web package
 WORKDIR /app/packages/web
+RUN pnpm build  # produces dist/
 
-EXPOSE 3000
-CMD ["bun","x","vite","preview","--host","0.0.0.0","--port","3000"]
+# ---------- Stage 2: serve ----------
+FROM nginx:alpine
+
+# Copy built static files into nginx web root
+COPY --from=builder /app/packages/web/dist /usr/share/nginx/html
+
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
